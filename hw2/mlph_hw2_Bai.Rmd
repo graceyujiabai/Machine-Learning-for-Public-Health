@@ -1,0 +1,350 @@
+---
+title: "ML for Public Health hw2"
+author: "Yujia Bai (Grace)"
+date: '2022-04-20'
+output:
+  html_document: default
+  word_document: default
+---
+
+1. binary到底改不改数据类型？感觉区别不大
+
+2. predict用在polynomial上为什么列数不对呢
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+#read in necessary libraries
+library(readr)
+library(tidyverse)
+library(splines)
+library(gridExtra)
+library(caret)
+library(gam)
+library(stats)
+```
+
+### 1. On canvas there is a dataset called `Chicago_air_quality.csv`. The data is derived from the National Morbidity, Mortality, and Air Pollution Study (NMMAPS). 
+In the dataset, each row represents a day and the included variables are:
+	1. Day: The study day (1-1000)
+	2. tmpd: The average temperature in Fahrenheit for the day
+	3. linear_pm25: Median particles < 2.5 mg per cubic m (measure of air quality). Missing data has been linearly interpolated
+	4. linear_pm10: Median particles 2.5-10 mg per cubic m. Missing data has been linearly interpolated
+	5. o3median: Median ozone in parts per billion
+	6. death: total deaths in the city for the day
+
+Consider developing a predictor with the natural logarithm of the number of deaths as the outcome and the other variables as input features. 
+
+For this assignment, demonstrate at least three different basis function options for the features to predict the outcome, with the question of does air quality predict the mortality rate within a geographic region. 
+
+Explain why you chose the three different basis functions as candidate predictors and in a short paragraph explain how they performed for this task. 
+
+Using one of the resampling methods (bootstrap or cross-validation) estimate the predictive performance for each predictor. 
+
+How did the different predictors vary in their predictive performance?
+```{r}
+air <- read_csv("Chicago_air_quality.csv")
+head(air)
+```
+
+#### Observe data trends
+```{r}
+#create list of all columns to loop through
+ls.air <- list(air$Day, air$tmpd, air$linear_pm25, air$linear_pm10, air$o3median)
+
+plots <- list()
+for (i in 1:length(ls.air)){
+ plots[[i]] <- print(ggplot(air, aes(x = ls.air[[i]], y = log(death))) +
+  geom_point() + 
+  xlab(print(paste0(i))) + 
+  ylab("log(death)"))
+ }
+```
+
+#### Check data distribution
+##### from the histograms, we see that most variables in our data have a skewed distribution-->center and scale data
+```{r}
+#loop through all columns and plot histograms
+for (i in 1:length(ls.air)){
+ print(ggplot(air, aes(x = ls.air[[i]])) +
+  geom_histogram())
+}
+
+
+air$tmpd_scale <- scale(air$tmpd)
+air$linear_pm25_scale <- scale(air$linear_pm25)
+air$linear_pm10_scale <- scale(air$linear_pm10)
+air$o3median_scale <- scale(air$o3median)
+
+head(air)
+
+air.full <- air
+
+#select relevant variables for air quality
+air <- select(air, c(death, tmpd_scale, linear_pm10_scale, linear_pm25_scale, o3median_scale))
+```
+#### Train-test split
+```{r}
+set.seed(1)
+in.train <- createDataPartition(air$death, p = .75, list = F)
+train.air <- air[in.train,]
+test.air <- air[-in.train,]
+```
+
+Though I show four basis functions below, I eventually chose to use GAM, cubic spline, and LOESS basis functions in comparing model performance.
+
+This is because there does not seem to be sharp discontinuities in the data except for the relationship of "day" with log(deaths), and even then, the relationship seems to look like what a polynomial function could characterize. Therefore, functions that describe smoother trends might be better fits for the data at hand, and I eliminated the step function and MARS. The reason I eliminated the polynomial was because most of the data did not show a polynomial trend, and another basis function depicting a smoother trend or allowing for more flexibility (e.g. splines) might be a better fit.
+
+
+#### Develop models with basis functions
+##### Polynomial
+```{r}
+poly <- lm(log(death) ~ poly(tmpd_scale, degree = 3) + 
+             poly(linear_pm25_scale, degree = 2) + 
+             poly(linear_pm10_scale,degree = 2) + 
+             poly(o3median_scale, degree = 2), 
+           data = train.air)
+summary(poly)
+```
+
+##### Cubic spline
+```{r}
+spline <- lm(log(death) ~
+              bs(tmpd_scale, knots = c(360, 720))+ 
+               bs(linear_pm25_scale, knots = c(360, 720)) + 
+               bs(linear_pm10_scale, knots = c(360, 720))+ 
+               bs(o3median_scale,knots = c(360, 720)),
+            data = train.air)
+# glm(log(death) ~ ns(tmpd_scale + linear_pm25_scale + linear_pm10_scale + o3median_scale, 3), data = train.air)
+summary(spline)
+```
+
+##### LOESS
+```{r}
+library(stats)
+loess <- loess(log(death) ~ tmpd_scale + 
+                 linear_pm25_scale + 
+                 linear_pm10_scale + 
+                 o3median_scale, 
+               data = train.air, 
+               span = 0.7)  
+summary(loess)
+```
+#### GAM
+```{r}
+gam <- gam(formula = (log(death) ~ 
+                        s(tmpd_scale) + 
+                        s(linear_pm25_scale) + 
+                        s(linear_pm10_scale) + 
+                        s(o3median_scale)),
+           data = train.air, 
+           family = gaussian)
+
+summary(gam)
+```
+
+From the above results, we see that air quality does to an extent predict deaths, though not all air quality measures are significant when controlling for other air quality parameters.
+
+#### Use cross-validation to evaluate performance
+```{r}
+#create folds
+nrow.air <- nrow(air)
+V <- 10
+set.seed(1)
+folds <- split(sample(1:nrow.air), rep(1:V, length = nrow.air))
+
+#create matrix for dumping cv results
+cvOUT <- matrix(NA, nrow = 10, ncol = 3)
+colnames(cvOUT) <- c("gam", "spline", "loess")
+```
+
+##### GAM
+```{r}
+for(v in 1:V) {
+  tmp_train <- air[-folds[[v]], ]
+  tmp_test <- air[folds[[v]], ]
+  gam <- gam(formula = (log(death) ~ 
+                        s(tmpd_scale) + 
+                        s(linear_pm25_scale) + 
+                        s(linear_pm10_scale) + 
+                        s(o3median_scale)),
+           data = train.air, 
+           family = gaussian)
+  
+# estimate MSE on held out fold set
+cvOUT[v, 1] <- mean((tmp_test$death - exp(predict(gam, newdata = tmp_train)))^2)
+}
+```
+
+##### Cubic spline
+```{r}
+for(v in 1:V) {
+  tmp_train <- air[-folds[[v]], ]
+  tmp_test <- air[folds[[v]], ]
+  spline <- lm(log(death) ~
+              bs(tmpd_scale, knots = c(360, 720))+ 
+               bs(linear_pm25_scale, knots = c(360, 720)) + 
+               bs(linear_pm10_scale, knots = c(360, 720))+ 
+               bs(o3median_scale,knots = c(360, 720)),
+            data = train.air)
+             
+# estimate MSE on held out fold set
+cvOUT[v, 2] <- mean((tmp_test$death - exp(predict(spline, newdata = tmp_test)))^2)
+}
+```
+
+##### LOESS
+```{r}
+for(v in 1:V) {
+  tmp_train <- air[-folds[[v]], ]
+  tmp_test <- air[folds[[v]], ]
+  loess <- loess(log(death) ~ tmpd_scale + 
+                 linear_pm25_scale + 
+                 linear_pm10_scale + 
+                 o3median_scale, 
+               data = tmp_train, 
+               span = 0.8)
+             
+# estimate MSE on held out fold set
+cvOUT[v, 3] <- mean((tmp_test$death - exp(predict(loess, newdata = tmp_test)))^2)
+}
+```
+
+#### CV error comparison
+```{r}
+cvOUT
+summary(cvOUT)
+```
+#### Conclusion
+
+It seems that out of the three basis functions, LOESS showed the best performance, followed by cubic spline, and then GAM, in terms of cross-validation MSE. 
+
+GAM generated higher MSE values than both cubic spline and LOESS. The MSE for cubic splines fluctuated in different folds, but was much lower than that of GAM's on average . LOESS seems to have produced NAs in the cross-validation process, but the MSE that it did produce were quite low in comparison to the other two basis functions.
+
+### 2. Also on canvas is a de-identified dataset called `HW2_dataset.csv`. 
+The dataset has been modified to be completely de-identified and all variables names anonymized. 
+The outcome variable is Y, and X1 through X125 are potential features representing a mixture of variable types (binary, categorical, and continuous). 
+
+The task is to compare a series of regularized regression predictors using the squared error loss function. Consider the following methods:
+
+	1. Regular Linear Regression
+	2. Ridge Regression
+	3. Lasso Regression
+	4. Elastic Net Regression
+
+```{r}
+#read in libraries and data
+library(glmnet)
+library(gamlr)
+
+hw2 <- read_csv("HW2_dataset.csv")
+head(hw2)
+
+#manipulate data types
+hw2 <- hw2 %>% mutate_if(is.character, as.factor)
+hw2
+
+levels(hw2$X93)
+levels(hw2$X119)
+
+mutate(hw2, X93 = as.factor(ifelse(X93 == 'A', 1,
+                         ifelse(X93 == 'B', 2,
+                         ifelse(X93 == 'C', 3, NA)))))
+
+mutate(hw2, X119 = as.factor(ifelse(X119 == 'A', 1,
+                         ifelse(X119 == 'B', 2,
+                         ifelse(X119 == 'C', 3, 
+                         ifelse(X119 == 'D', 4, NA))))))
+```
+
+#### Split data into training and testing datasets
+```{r}
+library(caret)
+set.seed(1)
+in.train <- createDataPartition(hw2$Y, p = .75, list = F)
+
+#train test split
+#for linear model
+lm.train <- hw2[in.train,]
+lm.test <- hw2[-in.train,]
+
+#for regularization methods
+train.reg <- hw2[in.train,]
+y.train <- as.numeric(train$Y)
+train.reg <- model.matrix(Y ~ ., data = train)[,-1]
+
+test.reg <- hw2[-in.train,]
+y.test <- as.numeric(test$Y)
+test.reg <- model.matrix(Y ~ ., data = test)[,-1]
+```
+
+#### Build models
+```{r, results='hide'}
+lm <- lm(Y ~ ., data = lm.train)
+summary(lm)
+
+ridge <- cv.glmnet(train.reg, y.train, alpha = 0, standardize = T, type.measure = "mse", nfolds = 5)
+coef(ridge)
+
+lasso <- cv.glmnet(train.reg, y.train, alpha = 1, standardize = T, type.measure = "mse", nfolds = 5)
+coef(lasso)
+
+net <- cv.glmnet(train.reg, y.train, alpha = 0.5, standardize = T, type.measure = "mse", nfolds = 5)
+coef(net)
+```
+
+#### How do the different parameter estimates vary across these methods with the dataset?
+
+It seems that the linear model output larger coefficients for all predictors.
+
+It is obvious that LASSO and Elastic Net shrunk most coefficients to 0 and only retained the most relevant predictors, while ridge regression shrunk many coefficients close to 0 but not precisely 0.
+
+This fits with the intuition that we built in class--LASSO will shrink coefficients to exactly 0, while ridge regression would penalize less relevant coefficients but not set them to exactly 0. While Elastic Net is essentially a tradeoff between LASSO and ridge regression, it seems that the Elastic Net here shrunk most coefficients to 0 but retained slightly more coefficients than LASSO.  
+```{r}
+coef.df <- data.frame(lm = coef(lm), 
+           ridge = as.numeric(coef(ridge)), 
+           lasso = as.numeric(coef(lasso)), 
+           elastic_net = as.numeric(coef(net)))
+coef.df
+```
+#### Which method appears to perform best?
+##### Linear model
+```{r}
+lm.predictions <- predict(lm, newdata = lm.test)
+lm.mse <- mean((y.test - lm.predictions)^2)
+cat("Linear model MSE:", lm.mse, "\n")
+```
+
+##### Regularization methods
+```{r}
+#calculate MSE for LASSO, ridge, and elastic net (with all values of alpha != 0 or 1)
+ls.fit <- list()
+for (i in 0:10){
+  fit.num <- paste0("alpha = ", i/10)
+  
+  ls.fit[[fit.num]] <- cv.glmnet(train, y.train, type.measure = "mse", alpha = i/10)
+}
+ls.fit
+
+results <- data.frame()
+for (i in 0:10){
+  fit.num <- paste0("alpha = ", i/10)
+  
+  predictions <- predict(ls.fit[[fit.num]],
+                         s = ls.fit[[fit.num]]$lambda.1se, newx = test)
+  
+  mse <- mean((y.test - predictions)^2)
+  
+  temp <- data.frame(alpha = i/10, mse = mse, fit.name = fit.num)
+  results <- rbind(results, temp)
+}
+results
+```
+We see that for ridge regression (alpha = 0), MSE = 146.7. &nbsp;
+
+For LASSO (alpha = 1), MSE = 127.0. &nbsp;
+
+For elastic net with alpha = 0.7, MSE = 125.4. &nbsp;
+
+
+Elactic net had the best performance accoridng to the squared error loss function.

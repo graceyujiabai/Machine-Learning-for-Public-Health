@@ -1,0 +1,294 @@
+---
+title: "ML for Public Health hw3"
+author: "Grace Bai"
+date: '2022-04-25'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r echo=FALSE,results='hide',message=FALSE}
+library(readr)
+library(tidyverse)
+library(ranger)
+library(randomForest)
+library(caret)
+# install.packages("doParallel")
+library(doParallel)
+library(ggplot2)
+# install.packages("SuperLearner")
+library(SuperLearner)
+# install.packages("janitor")
+library(janitor)
+```
+
+## 1. Using the same dataset from the last homework, `HW2_dataset.csv`, estimate a new predictor using the random forests algorithm. 
+```{r}
+## deal with data first
+## Tree-based algorithms make splits in the data where appropriate/useful. There is no need to rescale or manipulate data.
+
+data <- read_csv("HW2_dataset.csv")
+data <- data %>% mutate_if(is.character, as.factor)
+head(data)
+```
+#### Train-test splpit
+```{r}
+#train test split
+set.seed(424)
+in.train <- createDataPartition(data$Y, p = 0.80, list = F)
+train <- data[in.train,]
+test <- data[-in.train,]
+```
+
+#### Random forest
+```{r}
+## baseline; try out model first
+set.seed(1)
+rf <- ranger(formula = Y ~ .,
+             data = train,
+             num.trees = 500,
+             mtry = 11,
+             min.node.size = 1,
+             # num.threads = 4
+             )
+
+predictions <- predict(rf, data = test)
+mean((predictions$predictions - test$Y)^2)
+```
+
+#### Tuning mtry and min.node.size (tree depth) using ranger and caret
+```{r}
+#parallel processing
+cl <- makePSOCKcluster(6)
+registerDoParallel(cl)
+
+#create tune grid and search through a wide variety of parameters
+tuneGrid <- data.frame(
+  .mtry = c(11:60),
+  .splitrule = "variance", #continuous outcome
+  .min.node.size = c(1:50)
+)
+
+#random forest with caret and ranger
+set.seed(1)
+rf <- train(
+  Y ~ .,
+  tuneGrid = tuneGrid,
+  data = train, 
+  method = "ranger",
+  metric = "RMSE",
+  trControl = trainControl(method = "cv", 
+                           number = 10, 
+                           verboseIter = T)
+)
+plot(rf)
+# rf.predictions <- predict(rf, newdata = test)
+# mean((rf.predictions - test$Y)^2)
+```
+#### Final model
+Let's use a combination of the best parameters from each tuning step above to produce our final model.
+```{r}
+final.rf <- ranger(formula = Y ~ .,
+             data = train,
+             num.trees = 500,
+             mtry = rf$bestTune[,1],
+             min.node.size = rf$bestTune[,3],
+             # num.threads = 6
+             )
+rf.predictions <- predict(rf, newdata = test)
+
+mean((rf.predictions - test$Y)^2) #MSE = 128.4652
+
+stopCluster(cl)
+```
+### a. How does the mean squared error estimate for your random forests predictor compare with the regularized regression estimates from HW2? 
+
+The results from last time are shown below:
+
+    MSE       alpha
+0.0	151.7433	alpha = 0		
+0.1	133.8674	alpha = 0.1		
+0.2	128.6935	alpha = 0.2		
+0.3	125.7313	alpha = 0.3		
+0.4	127.7609	alpha = 0.4		
+0.5	128.4202	alpha = 0.5		
+0.6	129.4265	alpha = 0.6		
+0.7	126.3397	alpha = 0.7		
+0.8	127.3386	alpha = 0.8		
+0.9	125.9892	alpha = 0.9
+1.0	127.0320	alpha = 1
+
+Random forest MSE = 128.4652.
+
+The MSE of random forests was significantly lower than that of ridge regression's, but quite similar to elastic net and lasso. Lasso outperformed random forest by about 1.4 MSE score. Elastic net outperformed random forest in some cases (e.g. alphs = 0.3 and 0.9), but overall, the average MSE of elastic net was similar to that of random forest's as well. 
+
+This is both interesting and surprising, since random forest is a state-of-the-art machine learning algorithm that involves parameter tuning, where lasso, elastic net, and ridge regression are relatively more simple. Perhaps my parameter tuning process could be improved (such as expanding the range of parameters and see if CV error continues to decrease) so that random forest significantly outperforms the regularization methods, but it seems that lasso and elastic net might as good of a fit as random forest for this task (or maybe even a better fit since the process is so much simpler).
+
+
+### b. Create a scatterplot comparing the predicted values from your random forests to your predictions from the lasso regression and describe how they are similar or different.
+```{r}
+#lasso
+library(glmnet)
+hw2 <- read_csv("HW2_dataset.csv")
+
+#train test split; use data split from earlier
+y.train <- as.numeric(train$Y)
+train.reg <- model.matrix(Y ~ ., data = train)[,-1]
+
+y.test <- as.numeric(test$Y)
+test.reg <- model.matrix(Y ~ ., data = test)[,-1]
+
+#lasso predictions
+lasso <- cv.glmnet(train.reg, 
+                   y.train, 
+                   alpha = 1, 
+                   standardize = T, 
+                   type.measure = "mse", 
+                   nfolds = 10)
+
+lasso.pred <- predict(lasso,
+                      s = lasso$lambda.1se, 
+                      newx = test.reg)
+
+#MSE
+mean((lasso.pred - test$Y)^2) #120.1232
+```
+
+
+```{r}
+#random forest predictions
+rf.predictions <- data.frame(rf.predictions)
+
+#all predictions
+all.pred <- data.frame(rf.pred = rf.predictions,
+           lasso.pred = lasso.pred,
+           Y = test$Y)
+colnames(all.pred) <- c("random_forest","lasso","Y")
+all.pred
+summary(all.pred)
+```
+
+#### Scatterplot
+```{r}
+#create scatterplot
+plot(all.pred$random_forest, col = "red", pch = 1,
+     xlab = "predictions", ylab = "value",
+     ylim = c(-15,40)
+     )  
+points(all.pred$lasso, col = "light blue", pch = 19)
+legend("topleft", legend=c("random forest", "lasso"),
+       col=c("red", "light blue"), pch=c(1,19), cex=0.8)
+lines(mean(all.pred$Y), mean(all.pred$Y), lwd = 3, col = "red")
+```
+
+#### Discussion:
+
+Both lasso and random forest predictions seem to have similar mean values, with lasso producing more "extreme" minimum and maximum estimates (smaller low values and larger high values) than random forest. The mean of lasso predictions is slightly higher than that of random forest's. Judging from the scatterplot, the ranger predictions mostly likely have a smaller SE than lasso. From the histograms (below), we can also see that lasso predictions follow a normal distribution better than random forest predictions.
+
+However, both algorithms seem to predict within a certain range, as neither captures the Y values that are extremely high or low. Also, both algorithms tend to predict positive values than negative ones (even though there are 39 negative Y values), seen from the scatterplot and also the specific output data frame.
+
+After calculating MSE, I found that lasso and random forest performed similarly for this task, with the MSE for lasso slightly lower than that of random forest's. Given that ranger is a much more complex and computationally-demanding algorithm than lasso, this tells us that there is no one "best algorithm" that solves all prediction problems, but different algorithms might suit different tasks differently.
+
+#### Extra: histograms
+```{r}
+par(mfrow = c(1,2))
+hist(all.pred$random_forest, main = "random forest")
+hist(all.pred$lasso, main = "lasso")
+```
+
+
+## 2. In the random forest prediction above, how did you select the values for the tuning parameters mtry and tree depth?
+I started out with the default parameters num.tree = 500, mtry ~=~ sqrt(p) (11), and min.node.size = 1 to establish a baseline random forest model. The MSE for the baseline model was 155.847.
+
+Then, I used the train() function from caret and method = ranger (a faster implementation of randomForest) to tune parameters through a grid search of mtry and min.node.size values and 10-fold cross-validation for all parameter combinations. I searched through a wide ranger of mtry and min.node.size values and found that relatively larger mtry and min.node.size values produced smaller in-sample MSEs. The final optimal mtry and min.node.size parameters were 54 and 44 (might change in the actual run).
+
+I used the default ntree = 500 and did not choose to tune ntree here. This is because I tried tuning tree numbers and found that ntree = 500, 1500, and 2500 produced similar MSEs and minor improvements for prediction errors. The tuning process for ntree was also time-consuming. More importantly, the number of trees do not influence random forests as much as mtry and min.node.size in random forests.
+
+Finally, the combination of best parameters from my tuning steps produced a test MSE of 130.4515 (might change in the actual run), much lower than the result from default parameters. Though growing a large tree (by setting a large min.node.size value) had the potential of overfitting, we see from the prediction results on testing data that our model did not overfit, possibly because the results were averaged over trees and prevented overfitting.
+
+
+## 3. Finally, for this same dataset, estimate a super learner ensemble with at least 10 different candidate learners in the library, these can be a mixture of different algorithms and different values of tuning parameters to create the 10 different candidates. 
+
+#### Look at data again
+Since there are too many variables of different types/attributes, and plotting the distributions for all columns is not efficient, I will choose algorithms that do not typically require rescaling of data (e.g. no k-nearest neighbors) to avoid scaling issues.
+```{r}
+#search for binary columns and factors
+apply(data, 2, function(x) {all(x %in% 0:1)}) #X13,28,48,75,82,85,89,95,100,117,125
+
+#eyeballing: X79,93,119 are factors
+
+hist(data$Y) #our outcome variable is roughly normally distributed with a roughly gaussian distribution
+```
+
+#### Candidate learners
+```{r}
+#list of candidate learners
+listWrappers()
+
+enet = create.Learner("SL.glmnet", detailed_names = TRUE,
+                      tune = list(alpha = seq(0, 1, 
+                                   length.out = 3)))
+
+sl_lib = c(enet$names,
+           "SL.mean", #naive guess; baseline
+           "SL.gam", 
+           "SL.gbm",
+           "SL.xgboost", 
+           "SL.loess",
+           "SL.ranger",
+           "SL.nnet")
+
+
+#setup
+#use model.matrix to convert factors to numeric
+set.seed(41)
+x_sl <- model.matrix(Y ~ ., data = train)[,-1]
+x_sl <- janitor::clean_names(as.data.frame(x_sl))
+y_sl <- as.numeric(train$Y)
+```
+
+#### Run SuperLearner
+```{r}
+#superlearner
+#parallel processing
+# from SuperLearner CRAN webpage
+# install.packages("RhpcBLASctl")
+library(RhpcBLASctl)
+num_cores = RhpcBLASctl::get_num_cores()
+options(mc.cores = "num_cores")
+getOption("mc.cores")
+
+set.seed(1, "L'Ecuyer-CMRG")
+
+fit_sl <- SuperLearner(Y = y_sl, X = x_sl,
+                       SL.library = sl_lib,
+                       family = "gaussian",
+                       method = "method.NNLS",
+                       cvControl = list(V = 10)) 
+fit_sl
+
+#10-fold cross-validation
+fit_sl_cv <- CV.SuperLearner(Y = y_sl, X = x_sl,
+                       SL.library = sl_lib,
+                       family = "gaussian",
+                       method = "method.NNLS",
+                       cvControl = list(V = 10),
+                       innerCvControl = list(list(V = 10)))
+summary(fit_sl_cv)
+plot(fit_sl_cv)
+ggsave("SuperLearner.png")
+
+# Review the distribution of the best single learner as external CV folds.
+# from SuperLearner CRAN webpage
+table(simplify2array(fit_sl_cv$whichDiscreteSL)) #lasso 9, elastic net 1
+```
+
+### Using a nested cross-validation approach (like the CV.SuperLearner function), how does the 10-fold cross-validated estimate of the mean squared error compare between the final ensemble and the individual candidate algorithms?
+
+In the summary of results shown above, "Super Learner" shows the average MSE from the final ensemble, and "Discrete SL" shows the average MSE of the best individual algorithm. Although we would normally expect the ensemble to produce slightly better results (lower MSE) than individual candidate algorithms, including the best individual learner, the LASSO algorithm outperformed SuperLearner by 1.04, and elastic net also outperformed the ensembled learner by about 0.5 (both in terms of MSE). The ensemble outperformed all other individual algorithms, even ranger, neural net and xgboost, which are all commonly-used state-of-the-art machine learning methods.
+
+Why individual candidate algorithms slightly outperformed the ensemble: Perhaps the individual candidates that I chose were not the best algorithms for this specific task, given that I did not thoroughly investigate the distribution and characteristics of the data. The initial superlearner fit showed that only elastic net, lasso, GAM, and xgboost were given non-zero weights. 
+
+Moreover, there was no parameter tuning involved, and all individual candidates in the model only used default parameters. The results of the ensembled superlearner might see improvements if more suitable algorithms were chosen after careful observation of the data and also if the cross-validation process involved parameter tuning. 
+Nevertheless, it was still surprising to me that ranger and neural networks did not outperform lasso or elastic net on this task. This echos what I brought up for question 2: there is no "best algorithm" for every problem; only the most suitable algorithm would generate the best results.

@@ -1,0 +1,268 @@
+---
+title: "MLph_hw4_Bai"
+author: "Grace Bai"
+date: '2022-05-17'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+if (!require("pacman")) install.packages("pacman")
+
+pacman::p_load(
+  tidyverse,
+  broom,
+  ranger,
+  glmnet,
+  gamlr,
+  caret,
+  coefplot,
+  mlr3,
+  ROSE,
+  mlr3learners,
+  iml,
+  doParallel
+)
+```
+
+### 1. Data from the US National Health and Nutrition Examination Study (NHANES) has been made available in the NHANES package in R:
+  library(NHANES)
+  
+  data(NHANES)  # 10000 observations with 75 features
+  
+  table(NHANES$Diabetes) # Diabetes yes/no outcome
+
+```{r}
+#install.packages("NHANES")
+library(NHANES)
+  
+data(NHANES)  # 10000 observations with 75 features
+  
+table(NHANES$Diabetes) # Diabetes yes/no outcome
+```
+
+#### a. Estimate a predictor for diabetes given the other health and demographic variables (outcome is the probability of diabetes). Describe your approach to selecting features (do not use all 75) and evaluation method for model selection.
+
+First, I deleted features that are obviously irrelevant to our outcome 'diabetes':ID and survey year.
+
+Next, I calculated how many NA values each column had and dropped the columns with less than 70% * 10,000 = 7,000 observations (NA > 3,000). This left us with 38 features.
+
+For the rest of the features, there were variables that seemed irrelevant to diabetes, such as HomeRooms and HomeOwn; however, given the complexity of diabetes and potential confounding variables needed to control for, to avoid subjectively deciding what might predict diabetes and what might not, I decided to use LASSO for feature selection and parameter shrinkage for an automated selection of parameters. The final features are shown in my results.
+
+Evaluation method for model selection: I used a confusion matrix and focused on accuracy and sensitivity to determine whether my model was doing well on classifying the outcome of diabetes. Depending on my selected threshold for classifying prediction results as 1 (yes diabetes) or 0 (no diabetes), the accuracy of my model changes, but overall the accuracy was above 90%, and the true positive rate was also above 90% in most cases. However, I believe it is also necessary to plot the ROC curve to see how well my model does in terms of true positive and false negative rate trade-offs. My model AUC = 0.87, showing that the prediction results did perform quite well in classifying diabetes.
+
+
+##### Observe data
+```{r}
+diabetes <- NHANES
+head(diabetes)
+str(diabetes)
+```
+
+##### Deal with data
+```{r}
+#first: delete ID and SurveyYr, as they are not relevant to our outcome
+diabetes <- dplyr::select(diabetes, -c("ID","SurveyYr"))
+diabetes2 <- diabetes
+
+#check NA values
+na <- cbind(
+   lapply(
+     lapply(diabetes, is.na)
+     , sum)
+   ) #multiple columns have a significant number of NA values
+
+#delete variables with more than 3,000 NA values
+na <- as.data.frame(na) %>% unlist() %>% as.data.frame()
+rownames(na) <- colnames(diabetes)
+na <- filter(na, na$.>3000)
+
+diabetes2 <- dplyr::select(diabetes2, -c(rownames(na))) #38 variables left
+
+#filter out NAs in our response variable (and other rows that match these NAs)
+diabetes2 <- diabetes2 %>% 
+  filter(!is.na(Diabetes)) %>% 
+  dplyr::select(Diabetes, everything())
+
+#recode response variable
+diabetes2$Diabetes <- ifelse(diabetes2$Diabetes == "No", 0, 1)
+diabetes2
+```
+
+##### Train test split; constructing x and y
+```{r}
+#train test split
+set.seed(1)
+in.train <- createDataPartition(diabetes2$Diabetes, p = .80, list = F)
+
+train <- diabetes2[in.train,]
+test <- diabetes2[-in.train,]
+
+## Since our data is now high-dimensional, use LASSO to conduct feature selection
+
+#construct x and y
+y.train <- train$Diabetes
+y.test <- test$Diabetes
+
+#too many NA values
+#let NAs pass into the matrix first, then substitute NA with 0s
+options(na.action="na.pass")
+x.train <- model.matrix(Diabetes~., data = train)[,-1]
+x.train[is.na(x.train)] <- 0
+
+options(na.action="na.pass")
+x.test <- model.matrix(Diabetes~., data = test)[,-1]
+x.test[is.na(x.test)] <- 0
+```
+
+
+##### Run lasso; extract coefficients
+```{r}
+library(coefplot)
+
+set.seed(1)
+lasso.cv <- cv.glmnet(x.train, y.train, 
+                   family = "binomial", 
+                   alpha = 1,
+                   standardize = T,
+                   type.measure = "auc",
+                   nfolds = 5)
+
+coefs <- extract.coef(lasso.cv)
+coefs #final features
+```
+
+Final features are shown above.
+
+##### Model selection method
+```{r}
+#use lambda 1se
+# model_1 <- glmnet(x.train, y.train, 
+#                    family = "binomial", 
+#                    alpha = 1,
+#                    standardize = T,
+#                    type.measure = "auc",
+#                    lambda = lasso.cv$lambda.1se)
+
+##for lasso
+pred_1 <- predict(lasso.cv, newx = x.test, type = "response", s = lasso.cv$lambda.1se)
+pred_1 <- ifelse(pred_1 > 0.5, 1, 0) %>% as.numeric
+
+caret::confusionMatrix(data = as.factor(pred_1), reference = as.factor(y.test))
+```
+
+
+#### b. Using a resampling method, estimate the ROC curve for the predictor and report the area under the ROC curve.
+
+I chose to use 5-fold cross-validation as my resampling method, implemented by my code above (lasso.cv). My code is shown below:
+
+set.seed(1)
+
+lasso.cv <- cv.glmnet(x.train, y.train, 
+
+                   family = "binomial", 
+                   
+                   alpha = 1,
+                   
+                   standardize = T,
+                   
+                   type.measure = "auc",
+                   
+                   nfolds = 5)
+
+AUC = 0.87, and the ROC curve is shown below.
+
+```{r}
+#lasso ROC curve
+#use lasso.cv results from above
+
+roc.curve(pred_1, y.test) #AUC = 0.87
+```
+
+### 2. Using the random forest predictor you estimated in HW3, apply the permutation feature importance method from Lecture 14. 
+
+```{r}
+#feature permutation importance
+task <- as_task_regr(data, target = "Y")
+learner <- lrn("regr.ranger", id = "data-rf")
+learner$train(task)
+
+pred.rf <- Predictor$new(learner, data = data, y = data$Y)
+
+importance <- FeatureImp$new(pred.rf, loss = 'mse')
+
+plot(importance)
+```
+
+#### a. Which features have the greatest impact on the mean squared error loss function for the random forest predictor?
+
+X34, X72, X1, X124, X70, and X28 have relatively higher importance than the rest of the predictors (all have importance > 1.3) and have the greatest impact on the MSE loss for the random forest prediction.
+```{r}
+#show feature importance
+imp <- importance$results
+imp
+```
+
+#### b. For the top features, do any exhibit non-linearities (e.g. using accumulated local effects plots) and two-way interactions (H-statistics)?
+
+##### ALE
+
+Non-linearity: Except for feature X28, the top 6 features with importance > 1.3 all show some level of non-linearity in their correlation with outcome Y.
+```{r}
+#plot ale for features with importance > 1.3
+effect <- FeatureEffects$new(pred.rf)
+effect$plot(features = c("X34", "X72", "X1","X124","X28","X70"))
+
+# ale1 <- FeatureEffect$new(pred.rf, "X34",
+#                          method = "ale")
+# ale1$plot()
+```
+
+##### H-stats - two-way interactions?
+
+I calculated two-way interactions for the top three features in terms of importance and found that there were two-way interactions between the top 3 features and other variables, though two-way interactions for X34 with other variables were relatively weak, as were X72 and X1. Since these three variables have the highest impact on our outcome, it is safe to say that there are two-way interactions in this dataset to some degree, but the two-way interactions are all weak interactions.
+```{r}
+#H-stats
+ia <- Interaction$new(pred.rf, feature = ("X34")) #interactions with X34
+ia2 <- Interaction$new(pred.rf, feature = ("X72"))
+ia3 <- Interaction$new(pred.rf, feature = ("X1"))
+
+plot(ia)
+ia.results <- ia$results
+ia.results[order(.interaction, decreasing = T),] #sort results
+
+plot(ia2)
+ia2.results <- ia2$results
+ia2.results[order(.interaction, decreasing = T),] 
+
+plot(ia3)
+ia3.results <- ia3$results
+ia3.results[order(.interaction, decreasing = T),] 
+```
+
+### 3. The recent article by Barbieri S et al. (2021) estimated a cardiovascular risk predictor using administrative data from the health system in New Zealand  (The PDF is available on canvas). 
+
+#### a. Describe how the outcome was defined, what the loss function was for their main deep learning predictor, and how you think the predictor could be used for future participants.
+
+Outcome: 5-year cardiovascular disease risk, specifically "the time in days to the first fatal or non-fatal CVD event identified from national hospitalization and mortality datasets over the 5-year period between 1 January 2013 and 31 December 2017." (outcomes were specified for male/female)
+
+Loss function: Cox partial likelihood. Model comparison was conducted through comparing proportion of explained variance, model calibration and discrimination, and hazard ratios for predictor variables.
+
+Future participants: Under the condition that data for future participants are collected in a similar way to the original data and that no significant feature drift or model drift occurs, the same model could be used for prediction. However, if the distribution of future participants changes and the model is unsuitable for future participants, authors will need to trace prediction performance and performance metrics, recalibrate their model by updating key parameters, and perhaps estimate a predictor with a new training and evaluation data set (lecture 12 notes).
+
+#### b. Assume the authors of this predictor are intending to use this predictor on future individuals in the New Zealand health system. What recommendations would you have for them to consider beyond what is in the manuscript prior to using these predictor in practice? 
+
+I would suggest that:
+
+1. Authors should be ware of feature drift from future individuals compared with past individuals, and they should also be careful to observe whether there is model drift and make sure the predictor is still suitable for future participants.
+
+2. Authors can collect data on new factors identified with cardiovascular disease from scientific studies in addition to the collected administrative health data to enrich the prediction dataset. For new data, authors must ensure that the data collection/preprocessing steps remain similar to data that were already used and evaluate whether the new predictors would be suitable for the ready model.
+
+3. Since electronic health record data can be modified over time, the authors will need to be ware of any differences in the new data and evaluate whether the updated records resemble a real-time data acquisition.
+
+4. New data that is collected should also be version-controlled, and data update schedules should also be monitored.
+
+5. Authors should also build data quality checks for missing data patterns, mistyped information, and outlier analysis (etc.) for new data that is collected.

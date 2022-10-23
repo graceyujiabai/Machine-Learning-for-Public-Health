@@ -1,0 +1,101 @@
+---
+title: "MLPH_hw1_Bai"
+author: "Yujia Bai (Grace)"
+date: '2022-04-07'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Homework 1
+Due: 2022-04-07
+
+### 1 When we have a binary outcome variable (e.g. Case = 1 and Control = 0) and interested in estimating a predictor for the probability Y=1 with a statistical learning algorithm, a few common loss functions are:
+	a. Brier Score: (y - f(x))^2
+	b. Negative Log Likelihood: -y*log(f(x)) - (1-y)*log(1 - f(x))
+   Where log is the natural log and f(x) is the predicted probability between 0 and 1. 
+   
+Create a figure showing how these 2 loss functions will differ across the range of predicted probabilities (0,1). In a short paragraph, describe how you think a predictor might differ when switching between these 2 loss functions.
+
+#### How a predictor might differ:
+The brier score function is the red line, and the negative log likelihood function is the green line.
+
+##### When Y = 1:
+The negative log likelihood loss function seems sensitive to low probabilities and generates much higher estimates for lower probabilities than the brier score function. As probabilities grow larger, the two loss functions seem to generate more similar estimates, but the brier score loss function always has a larger estimate than the negative log likelihood loss function except for when p = 0.
+
+Therefore, we can expect that the negative log likelihood loss function is more sensitive to lower predicted probabilities and would give a much higher loss estimate than brier score when predicted probabilities are low.
+
+Thus, when using the negative log likelihood function to evaluate predicted probabilities that have lower values, our results may seem "bad" because they generate a higher error. If we switch to brier score, it might make the model prediction results look better in terms of loss.
+
+##### When Y = 0:
+The negative log likelihood loss function seems sensitive to high probabilities and generates much higher estimates for higher probabilities than the brier score function. For smaller predicted probabilities, the two loss functions seem to generate more similar estimates, but the brier score loss function always has a larger estimate than the negative log likelihood loss function except for when p = 0.
+
+Therefore, we can expect that when the predicted probabilities are high, the negative log likelihood loss function would be more sensitive to these values and give us a much higher loss estimate than brier score when predicted probabilities are high.
+
+Thus, when using the negative log likelihood function to evaluate predicted probabilities that have higher values, our results may seem "bad" because they generate a higher error. If we switch to brier score, it might make the model prediction results look better in terms of loss, since brier score is more stable and less sensitive to extreme values.
+
+##### Also:
+Brier Score and Negative Log Likelihood essentially characterize different properties of a binary classification model. Depending on what type of distribution our data has, one loss function may be more suitable or relevant than another.
+```{r}
+library(ggplot2)
+library(cowplot)
+
+y1 <- 1
+y2 <- 0
+
+set.seed(1)
+p <- runif(100, min = 0, max = 1)
+
+#compute two loss functions
+brier_score_1 <- (y1 - p)^2
+neg_log_1 <- (-y1 * log(p)) - ((1-y1) * log(1-p))
+df_1 <- data.frame(p, brier_score_1, neg_log_1, values = c(brier_score_1, neg_log_1))
+head(df_1)
+
+brier_score_2 <- (y2 - p)^2
+neg_log_2 <- (-y2 * log(p)) - ((1-y2) * log(1-p))
+df_2 <- data.frame(p, brier_score_2, neg_log_2, values = c(brier_score_2, neg_log_2))
+head(df_2)
+
+#plots
+plt_1 <- ggplot(df_1, aes(x=p, values)) +
+  geom_line(aes(y = neg_log_1), color = "green") +
+    geom_line(aes(y = brier_score_1), color = "red") +
+  xlab('probabilities') +
+  ylab('loss when Case = 1')
+
+plt_2 <- ggplot(df_2, aes(x=p, values)) +
+  geom_line(aes(y = neg_log_2), color = "green") +
+    geom_line(aes(y = brier_score_2), color = "red") +
+  xlab('probabilities') +
+  ylab('loss when Case = 0')
+
+plot_grid(plt_1, plt_2, labels = "AUTO")
+```
+
+### 2 Describe an example of a machine learning analysis, either in a scientific publication or a news report. What were the outcome and features used in the analysis? Was it an example of supervised or unsupervised learning? Was it clear from the report if their goal was to predict, to infer, or both? Were the target populations and loss functions clearly defined?
+#### Answer
+Publication: Jiang, X., Ji, L., Chen, Y., Zhou, C., Ge, C., & Zhang, X. (2021). How to improve the well-being of youths: an exploratory study of the relationships among coping style, emotion regulation, and subjective well-being using the random forest classification and structural equation modeling. Frontiers in Psychology, 12.
+
+In Jiang et al. (2021), researchers investigated how coping style, emotion regulation, and subjective well-being related to each other and what psychological measures were most important contributors to subjective well-being. 
+
+Though there were several studies in the full analysis, the analysis that used the Random Forest machine learning method had high/low (1/0) subjective well-being as the outcome and participants' responses from the Satisfaction with Life Scale, Positive Negative Affect Schedule, Ways of Coping measures, and an emotional regulation questionnaire as features.
+
+This was an example of supervised learning, because the "answers" to the binary classification task was already specified, and the algorithm needed to learn what contributed to the high/low subjective well-being outcomes to generate predictions.
+
+It was quite clear that the goal was to predict for the random forest task. The goal was to predict whether someone would have high or low levels of subjective well-being using the collected data. A variable importance plot was also generated to show which variables contributed to subjective well-being more on average.
+
+The target population of this study was college students from China.
+
+The loss function was clearly defined as: Mean Absolute Error (MAE) = 1/m*sum|h(x^i) - (y^i)|; used to characterize the error between the real and predicted values.
+
+### 3 Describe the concept of over-fitting and why it might be a problem.
+#### Answer
+Overfitting is when a method (such as regression or a machine learning algorithm) "learns" from a model so complex that it follows random noise in the training dataset. Models that overfit may get a low training error, yet is unable to generalize training results to unseen testing data. When our models overfit, we may also see a less complex (or less flexible) model generate a lower test error (e.g. MSE).
+
+Overfitting is a problem because:
+1. With overfitting, our models do not learn actual information from the information we feed into it, but it instead picks up noise from the training data and assumes that may be the actual pattern. Therefore, our model cannot perform well on unseen data, which is usually the primary concern.
+2. Feeding a machine learning algorithm an overfitted model does not allow it to learn from realistic situations, as the overfitted model can represent real-world situations poorly.
+3. Overfitting leads to low prediction errors using training data and could be misleading for how the model would perform if tested on unseen data.
