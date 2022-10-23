@@ -1,0 +1,968 @@
+---
+title: "Machine Learning for Public Health Final Project"
+author: "Grace (Yujia) Bai"
+date: "`r Sys.Date()`"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    theme: yeti
+    vertical_layout: fill
+---
+
+<style type="text/css">
+
+.chart-title {  /* chart_title  */
+   font-size: 15px;
+   font-family: Calibri;
+
+</style>
+
+<style type="text/css">
+  body{
+  font-size: 11pt;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+1 Data introduction
+=================================================================
+<p style="font-family: calibri; font-size:20pt; font-style:bold">
+  Introduction
+</p>
+<p style="font-family: calibri; font-size:12pt; font-style:bold">
+  People consider well-being to be one of the most important components of a good life, sometimes    expressing a preference for elevated levels of well-being over high levels of material wealth      (Diener and Suh, 1999). Over the last several decades, researchers in the social sciences have     focused on well-being and its determinants as a critical research topic (Huppert, 2009). 
+  Despite consensus about the importance of well-being, recent studies indicate that levels of       well-being are quite low, particularly in industrialized countries (Bartolini et al., 2016; Clark   et al., 2008). For example, the Gallup Global Wellbeing survey (2010) reported that throughout     2005-2009, the majority of populations from over half of the countries surveyed were either        “struggling” or “suffering.” More recently, according to a longitudinal study done by Ettman et    al. (2022), depression rates in US adults tripled in the early stages of the COVID-19 pandemic in   2020 and persisted through 2021, now affecting 32.8 percent, or 1 in 3 American adults, despite    the US being one of the most economically developed countries in the world. Given the importance   of subjective wellbeing (SWB) in our daily lives, understanding the conditions that lead to or     predict high levels of SWB is a critical research question.
+</p>
+```{r, echo=FALSE}
+if (!require("pacman")) install.packages("pacman")
+
+pacman::p_load(
+  ggplot2,
+  plotly,
+  plyr,
+  flexdashboard,
+  tidyverse,
+  readr,
+  haven,
+  labelled,
+  broom,
+  ranger,
+  glmnet,
+  gamlr,
+  caret,
+  coefplot,
+  mlr3,
+  ROSE,
+  mlr3learners,
+  iml,
+  doParallel,
+  reshape2
+)
+```
+
+Row
+-----------------------------------------------------------------
+
+### Section 1 Source of data
+
+The data came from the Gallup Daily survey administered in the United States on participants of 18 years and older from 2008 to 2017. Gallup surveyed 1,000 individuals daily for 350 days every year during the span of the Gallup Daily survey, in which half of the participants would receive the Well-being track survey and the remaining half the Politics and Economy track survey. The Gallup Daily survey used random-digit-dial (RDD) cellphone samples and RDD list-assisted landline samples in participant selection, ensuring that the sampling of participants was fully randomized.
+
+In this project, the outcome of interest was subjective well-being (SWB), characterized by the question "Please imagine a ladder with steps numbered from zero at the bottom to 10 at the top. The top of the ladder represents the best possible life for you and the bottom of the ladder represents the worst possible life for you. On which step of the ladder would you say you personally feel you stand at this time? ".
+
+Predictors of the outcome included a host of demographic variables and variables related to health. Demographic variables included:
+
+- one's own income in US dollars
+
+- age
+
+- race
+
+- gender
+
+- employment status
+
+- marital status
+
+- education level
+
+- children and adults in household
+
+and variables relevant to health were within the below aspects:
+
+- psychological well-being
+
+- mental health
+
+- physical health
+
+- and specific health behaviors.
+
+A demographic relative income measure was also created to account for the possibility that individuals compare to others demographically similar to them, and one's status relative to others could also significantly impact SWB.
+
+The calculation of the demographic relative income measure followed the code below. This measure was calculated by taking the median income within the same age, sex, and race groups. Age was rounded to the nearest decade. Survey weights provided by Gallup Daily were also utilized to ensure that all samples were considered equally. This function joins the estimated demographic median income to the original dataframe.
+```{r}
+calculate_median_income_sar <- function(df){
+  med_inc_gallup <-
+    df %>% 
+    dplyr::select(
+      raw_income,
+      age,
+      sex,
+      race,
+      COMB_WEIGHT
+    ) %>% 
+    filter_all(all_vars(!is.na(.))) %>% 
+    mutate(
+      age_dec = round(age, digits = -1)
+    ) %>% 
+    group_by(
+      age_dec,
+      sex,
+      race
+    ) %>% 
+    dplyr::summarise(
+      #mean_income_demo_sar = matrixStats::weightedMean(raw_income, w = COMB_WEIGHT, na.rm = TRUE),
+      median_income_demo_sar = matrixStats::weightedMedian(raw_income, w = COMB_WEIGHT, na.rm = TRUE),
+      #gini_demo_sar = reldist::gini(raw_income, w = COMB_WEIGHT)
+    ) %>% 
+    ungroup()
+  
+  df <-
+    df %>% 
+    mutate(
+      age_dec = round(age, digits = -1)
+    ) %>% 
+    left_join(
+      med_inc_gallup,
+      by = c("sex", "age_dec", "race")
+    )
+  
+  return(df)
+}
+```
+
+
+### Section 2 Study design (intended usage, algorithms, loss function, and how study design impacts development)
+
+Though the Gallup Daily dataset was not curated to predict SWB, SWB was a variable included in the survey, and multiple features of the dataset have been shown to predict SWB to some degree. 
+
+Therefore, I first chose a set of variables that had been shown to predict SWB in past literature. Next, I planned to build a random forest model using demographics, physical health, mental health, and psychological well-being variables as predictors of SWB.
+
+Below are the details of my analysis plan:
+
+- I planned to build a random forest predictor using all independent variables to predict SWB (what positions participants felt they were on the Cantril Ladder). This utilized the nature of trees, such that the algorithm would make splits on variables that contribute to the prediction of our outcome while avoiding overfitting (since this is a dataset with many parameters). 
+
+- Then, I evaluated the prediction results using accuracy and AUC scores.
+
+- Finally, I plotted variable importance and feature permutation importance to discover important features that contributed to estimating SWB.
+
+- The random forest algorithm was evaluated using accuracy and AUC score under the ROC curve. This was because I transformed my outcome, SWB, to a binary variable, due to findings of the distribution of SWB in the exploratory analysis. Accuracy and AUC provided a complete picture of not only how many cases were classified correctly, but also the tradeoff between true positives and false positives for this classification task.
+
+Aside from the benefit of using random forests mentioned above, designing the study in this way first allowed for using scientific knowledge to identify potential predictors rather than merely relying on machine learning methods. Using the Gallup Daily survey also generated a representative conclusion of factors that contribute to SWB for Americans. Selecting variables in conjunction with using ensemble machine learning methods also combined human knowledge with automated techniques.
+
+However, a few drawbacks of this design was that random forests and the calculation of feature permutation importance are computationally expensive. Also, the Gallup Daily survey may not be representative of the American population if the population experiences a drift in future years. In this case, new data will need to be collected, and methods for collecting the new data will need to be as similar to the original methods as possible.
+
+
+
+
+
+
+### Section 3 Data cleaning
+```{r, echo=FALSE}
+#load data
+usdaily.2008 <- read_sav("US_DAILY_2008_DATA.SAV")
+usdaily.2009 <- read_sav("US_DAILY_2009_DATA.SAV")
+usdaily.2010 <- read_sav("US_DAILY_2010_DATA.SAV")
+usdaily.2011 <- read_sav("US_DAILY_2011_DATA.SAV")
+usdaily.2012 <- read_sav("US_DAILY_2012_DATA.SAV")
+usdaily.2013 <- read_sav("US_DAILY_2013_DATA.SAV")
+usdaily.2014 <- read_sav("US_DAILY_2014_DATA.SAV")
+usdaily.2015 <- read_sav("US_DAILY_2015_DATA.SAV")
+usdaily.2016 <- read_sav("US_DAILY_2016_DATA.SAV")
+usdaily.2017 <- read_sav("US_DAILY_2017_DATA.SAV")
+```
+
+#### Deal with data with a function
+
+Since Gallup Daily data were labeled with letters and numbers, I created a function to rename all variables according to Gallup Daily's codebook, derive certain variables that may be useful for the estimation of our outcome (SWB), and recode certain continuous variables into discrete scales (such as employment status) for a more concise representation. Specific procedures can be found in the R markdown file of my submission (at about line 200).
+
+```{r, echo=FALSE}
+#function to deal with all data
+munge_data <- function(df) {
+  df <- 
+    df %>% 
+    mutate(
+      subid = MOTHERLODE_ID,
+      year = YEAR)
+    
+  df <- 
+    df %>% 
+    mutate(
+      #employment
+      WP46 = ifelse(year %in% c(2008:2009), WP46, NA),
+      WP10200 = ifelse(year %in% c(2009:2017), WP10200, NA),
+      WP10202 = ifelse(year %in% c(2009:2017), WP10202, NA),
+      WP9081 = ifelse(year %in% c(2009), WP9081, NA),
+      WP8859 = ifelse(year %in% c(2009), WP8859, NA),
+      #purpose well-being
+      HWB19 = ifelse(year %in% c(2014:2017), HWB19, NA),
+      HWB1 = ifelse(year %in% c(2014:2017), HWB1, NA),
+      HWB20 = ifelse(year %in% c(2014:2017), HWB20, NA),
+      HWB11 = ifelse(year %in% c(2014:2017), HWB11, NA),
+      HWB2 = ifelse(year %in% c(2014:2017), HWB2, NA),
+      #community well-being
+      HWB21 = ifelse(year %in% c(2014:2016), HWB21, NA),
+      WP83 = ifelse(year %in% c(2014:2016), WP83, NA),
+      HWB9 = ifelse(year %in% c(2014:2016), HWB9, NA),
+      HWB22 = ifelse(year %in% c(2014:2016), HWB22, NA),
+      HWB23 = ifelse(year %in% c(2014:2016), HWB23, NA),
+      HWB18 = ifelse(year %in% c(2014:2016), HWB18, NA),
+      HWB10 = ifelse(year %in% c(2014:2016), HWB10, NA),
+      #financial well-being
+      WP40 = ifelse(year %in% c(2014:2017), WP40, NA),
+      HWB5 = ifelse(year %in% c(2014:2017), HWB5, NA),
+      HWB6 = ifelse(year %in% c(2014:2017), HWB6, NA),
+      M1 = ifelse(year %in% c(2014:2016), M1, NA),
+      HWB17 = ifelse(year %in% c(2014:2017), HWB17, NA),
+      #social well-being
+      HWB14 = ifelse(year %in% c(2014:2017), HWB14, NA),
+      HWB15 = ifelse(year %in% c(2014:2017), HWB15, NA),
+      HWB3 = ifelse(year %in% c(2014:2017), HWB3, NA),
+      HWB4 = ifelse(year %in% c(2014:2017), HWB4, NA),
+      #other employment vars
+      want_to_wrk = ifelse(year %in% c(2010:2016), WP10229, NA),
+      hrs_wrk_wk = ifelse(year %in% c(2010:2016), WP10215, NA),
+      looking_for_wrk = ifelse(year %in% c(2013:2016), WP10208, NA),
+      wks_looking_for_wrk = ifelse(year %in% c(2013:2016), WP10983, NA)
+      )
+  #return(df)
+
+  df <-
+    df %>% 
+    mutate(
+      # Demographics
+      income_summary = ifelse(INCOME_SUMMARY < 11, INCOME_SUMMARY, NA),
+      raw_income = 
+        case_when(
+          income_summary == 1 ~ 360,
+          income_summary == 2 ~ 3360,
+          income_summary == 3 ~ 9000,
+          income_summary == 4 ~ 18000,
+          income_summary == 5 ~ 30000,
+          income_summary == 6 ~ 42000,
+          income_summary == 7 ~ 54000,
+          income_summary == 8 ~ 75000,
+          income_summary == 9 ~ 105000,
+          income_summary == 10 ~ 120000,
+        ),
+      scale_income = 
+        scale(case_when(
+          income_summary == 1 ~ 360,
+          income_summary == 2 ~ 3360,
+          income_summary == 3 ~ 9000,
+          income_summary == 4 ~ 18000,
+          income_summary == 5 ~ 30000,
+          income_summary == 6 ~ 42000,
+          income_summary == 7 ~ 54000,
+          income_summary == 8 ~ 75000,
+          income_summary == 9 ~ 105000,
+          income_summary == 10 ~ 120000,
+        )) %>% as.numeric,
+      
+      education = ifelse(EDUCATION < 7, EDUCATION, NA),
+      education_fac = as.factor(education),
+      
+      sex = ifelse(SC7 %in% c(1),0,1),
+      
+      age = ifelse(WP1220 < 100 & WP1220 != 0, WP1220, NA),
+      scale_age = scale(ifelse(WP1220 < 100 & WP1220 != 0, WP1220, NA)) %>% as.numeric,
+      age_dec = round((ifelse(WP1220 < 100 & WP1220 != 0, WP1220, NA))/10)*10, #round to nearest decade
+      
+      race = as.factor(RACE),
+      
+      children = H17,
+      adults = D9,
+      
+      married = 
+        as.factor(ifelse(WP1223 == 6 | WP1223 == 7, NA, WP1223)),
+      
+      employment10_fac = as.factor(ifelse(year >= 2010, as.factor(EMPLOYMENT2010), NA)),
+      # 1 "Employed Full Time (Employer)"
+      # 2 "Employed Full Time (Self)"
+      # 3 "Employed Part Time, Do Not Want Full Time"
+      # 4 "Unemployed"
+      # 5 "Employed Part Time, Want Full Time"
+      # NA "Not in Work Force".
+      employment_all =
+        as.factor(
+          ifelse(
+            year %in% c(2008:2009) & !is.na(WP46) & WP46 == 1,
+            1,
+            ifelse(
+              year %in% c(2008:2009) & !is.na(WP46) & WP46 == 2,
+              0,
+              ifelse(
+                year %in% c(2009:2017) & !is.na(WP10200) & WP10200 == 1,
+                1,
+                ifelse(
+                  year %in% c(2009:2017) & !is.na(WP10200) & WP10200 == 2 & WP10202 == 1,
+                  1,
+                  ifelse(
+                    year %in% c(2009:2017) & !is.na(WP10200) & WP10200 == 2 & WP10202 == 2,
+                    0,
+                    ifelse(
+                      year == 2009 & !is.na(WP9081) & WP9081 == 1,
+                      1,
+                      ifelse(
+                        year == 2009 & !is.na(WP9081) & WP9081 == 2,
+                        0,
+                        ifelse(
+                          year == 2009 & !is.na(WP8859) & WP8859 == 1,
+                          1,
+                          ifelse(
+                            year == 2009 & !is.na(WP8859) & WP8859 == 2,
+                            0,
+                            NA
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          )
+        ),
+      
+      #Psychological
+      std_living = WP30,
+      econ = M30,
+      comp_satis_std_liv = ifelse(year %in% c(2014:2017) & HWB17 %in% c(1:5), HWB17, NA),
+      enough_money = ifelse(year %in% c(2014:2017) & HWB5 %in% c(1:5), HWB5, NA),
+      goals = ifelse(year %in% c(2014:2017)  & HWB20 %in% c(1:5), HWB20, NA),
+      little_pleasure = ifelse(year %in% c(2014:2017), H45, NA),
+      active_prod = ifelse(year %in% c(2014:2017), HWB7, NA),
+      #drugs_relax = ifelse(year %in% c(2014:2016), H46, NA),
+      
+      ladder_now = ifelse(year %in% c(2008:2017) & WP16 %in% c(1:10), WP16, ifelse(year %in% c(2018), LAD1, NA)),
+      ladder_5yrs = ifelse(year %in% c(2008:2017) & WP18 %in% c(1:10), WP18, ifelse(year %in% c(2018), LAD2, NA)),
+      cl_diff = ladder_5yrs - ladder_now,
+      
+      economy_getting_better = 4 - WP148,
+      enjoyment = WP67,
+      worry = WP69,
+      #sadness = ifelse(year %in% c(2017, 2018), NA, WP70),
+      stress = WP71,
+      
+      
+      # Health behaviors  
+      fruits_veggies = as.numeric(ifelse(H12B < 8, H12B, NA)),
+      exercise = as.numeric(ifelse(H12A < 8, H12A, NA)),
+      eat_healthy = as.numeric(M16 == 1, 1, ifelse(M16 == 2, 0, NA)),
+      smoke = as.numeric(H11 == 1, 1, ifelse(H11 == 2, 0, NA)),
+      #num_alc = ifelse(year %in% c(2014:2016), ALCO1, NA),
+      
+      
+      # Health outcomes
+      bmi = as.numeric(BMI),
+      obese = as.factor(OBESE),
+      general_health = H36,
+      hbp = H4A,
+      cholesterol = H4B,
+      diabetes = H4C,
+      depression = H4D,
+      heart_attack = H4E,
+      #asthma = H4F,
+      cancer = H4G,
+      height = HEIGHT,
+      
+      
+      # Geography
+      zipcode = as.factor(ZIPCODE),
+      census_region = as.factor(ZIPCENSUSREGION),
+      msa = as.factor(MSACODE),
+      fips_code = as.character(ifelse(year %in% c(2008:2012), fips_code, as.character(FIPS_CODE))),
+      COMB_WEIGHT = ifelse(year %in% c(2018), WB_WEIGHT, ifelse(year %in% c(2008:2017), COMB_WEIGHT, NA))
+      
+    )
+  
+  df <- mutate_at(df, 
+                  vars(education, 
+                       #gender, 
+                       race,
+                       sex,
+                       
+                           std_living,
+                           econ,
+                           comp_satis_std_liv ,
+                           enough_money,
+                           goals,
+                           little_pleasure,
+                           active_prod,
+                       
+                           enjoyment, worry, stress,
+                       
+                           eat_healthy, smoke,
+                       
+                           obese,
+                           general_health,
+                           hbp,
+                           cholesterol,
+                           diabetes,
+                           depression,
+                           heart_attack,
+                           cancer),
+                  as.factor) # in case datatype wasn't coded correctly
+  
+  return(df)
+}
+```
+
+#### Select variables
+
+I then created a function to select a host of variables that has been shown to predict SWB in  existing literature. All variables are shown in the function below and are related to demographics, psychological well-being, physical health, mental health, and health behaviors. Variables important to the outcome SWB will be clarified and explained in the results.
+```{r}
+select_variable <- function(df){
+  df <- data.frame(df %>% 
+                     select("subid",
+                            "year",
+                            "income_summary",
+                            "scale_income",
+                            "raw_income",
+                            "education",
+                            "sex",
+                            "age",
+                            "scale_age",
+                            "age_dec",
+                            "race",
+                            "employment_all",
+                            "married",
+                            "children",
+                            "adults",
+                            "std_living",
+                            "econ",
+                            "general_health",
+                            # "HWB17", #financial well-being
+                            # "HWB5", #financial well-being
+                            # "HWB20", #purpose well-being
+                            "little_pleasure",
+                            "active_prod",
+                            "ladder_now",
+                            "enjoyment",
+                            "worry",
+                            "stress",
+                            "fruits_veggies",
+                            "exercise",
+                            "eat_healthy",
+                            "smoke",
+                            "bmi",
+                            "obese",
+                            "hbp",
+                            "cholesterol",
+                            "diabetes",
+                            "depression",
+                            "heart_attack",
+                            "cancer",
+                            "height",
+                            "COMB_WEIGHT",
+                            "economy_getting_better",
+                            "enough_money",
+                            "goals",
+                            "comp_satis_std_liv",
+                            "cl_diff"
+                            ))
+  return(df)
+}
+```
+
+#### Munge data
+
+Next, I used the munge_data function defined earlier to rename variables and derive new variables that were not available in the original data but may contribute to our model outcomes.
+```{r, echo=FALSE}
+#munge data
+daily.2008 <- munge_data(usdaily.2008)
+daily.2009 <- munge_data(usdaily.2009)
+daily.2010 <- munge_data(usdaily.2010)
+daily.2011 <- munge_data(usdaily.2011)
+daily.2012 <- munge_data(usdaily.2012)
+daily.2013 <- munge_data(usdaily.2013)
+daily.2014 <- munge_data(usdaily.2014)
+daily.2015 <- munge_data(usdaily.2015)
+daily.2016 <- munge_data(usdaily.2016)
+daily.2017 <- munge_data(usdaily.2017)
+```
+
+#### Combine all data
+
+The last step of obtaining our dataframe was to select the relevant variables and join all dataframes together. NA values were all filtered in later steps.
+```{r, echo=FALSE}
+#create dataframes with desired variables
+#make a list of dataframes with all of the data
+ls <- list(daily.2008,
+     daily.2009,
+     daily.2010,
+     daily.2011,
+     daily.2012,
+     daily.2013,
+     daily.2014,
+     daily.2015,
+     daily.2016,
+     daily.2017)
+
+df <- list()
+
+#select variables for all years of data with for loop
+for (i in seq_along(ls)){
+  df[[i]] <- select_variable(ls[[i]])
+}
+
+#create new dataframes
+gd.2008 <- df[[1]]
+gd.2009 <- df[[2]]
+gd.2010 <- df[[3]]
+gd.2011 <- df[[4]]
+gd.2012 <- df[[5]]
+gd.2013 <- df[[6]]
+gd.2014 <- df[[7]]
+gd.2015 <- df[[8]]
+gd.2016 <- df[[9]]
+gd.2017 <- df[[10]]
+
+#combine all data
+gd.full <- bind_rows(gd.2008,
+                 gd.2009,
+                 gd.2010,
+                 gd.2011,
+                 gd.2012,
+                 gd.2013,
+                 gd.2014,
+                 gd.2015,
+                 gd.2016,
+                 gd.2017)
+
+#remove labels
+gd.full <- remove_labels(gd.full) #our final dataset
+```
+
+#### Calculate demographic median income and join to dataframe
+Finally, I calculated the demographic median income and joined the variable to our dataframe.
+```{r}
+gd.full <- calculate_median_income_sar(gd.full)
+```
+
+#### Filter NAs
+
+After filtering for all NAs in the dataset, I was left with 77,385 rows of data with 43 variables.
+```{r,echo=FALSE}
+df <- gd.full %>%
+  dplyr::select(subid,
+                            year,
+                            income_summary,
+                            median_income_demo_sar,
+                            scale_income,
+                            raw_income,
+                            education,
+                            sex,
+                            age,
+                            scale_age,
+                            age_dec,
+                            race,
+                            employment_all,
+                            married,
+                            children,
+                            adults,
+                            std_living,
+                            econ,
+                            general_health,
+                            # HWB17,#financial well-being
+                            # HWB5, #financial well-being
+                            # HWB20, #purpose well-being
+                            little_pleasure,
+                            active_prod,
+                            ladder_now,
+                            enjoyment,
+                            worry,
+                            stress,
+                            fruits_veggies,
+                            exercise,
+                            eat_healthy,
+                            smoke,
+                            bmi,
+                            obese,
+                            hbp,
+                            cholesterol,
+                            diabetes,
+                            depression,
+                            heart_attack,
+                            cancer,
+                            height,
+                            COMB_WEIGHT,
+                            economy_getting_better,
+                            enough_money,
+                            goals,
+                            comp_satis_std_liv,
+                            cl_diff) %>%
+  filter_at(vars(subid,
+                            year,
+                            income_summary,
+                            median_income_demo_sar,
+                            scale_income,
+                            raw_income,
+                            education,
+                            sex,
+                            age,
+                            scale_age,
+                            age_dec,
+                            race,
+                            employment_all,
+                            married,
+                            children,
+                            adults,
+                            std_living,
+                            econ,
+                            general_health,
+                            # HWB17,#financial well-being
+                            # HWB5, #financial well-being
+                            # HWB20, #purpose well-being
+                            little_pleasure,
+                            active_prod,
+                            ladder_now,
+                            enjoyment,
+                            worry,
+                            stress,
+                            fruits_veggies,
+                            exercise,
+                            eat_healthy,
+                            smoke,
+                            bmi,
+                            obese,
+                            hbp,
+                            cholesterol,
+                            diabetes,
+                            depression,
+                            heart_attack,
+                            cancer,
+                            height,
+                            COMB_WEIGHT,
+                            economy_getting_better,
+                            enough_money,
+                            goals,
+                            comp_satis_std_liv,
+                            cl_diff), 
+            all_vars(!is.na(.)))
+```
+
+The dimensions of the final dataset I intended to build my models on were 77385*43.
+```{r, echo=FALSE, results='asis'}
+# rownames(df) <- df$subid
+# 
+# df <- select(df, -c("subid"))
+# 
+# dim(df)
+# head(df)
+```
+3 Data Engineering
+======================================================
+
+Row
+-------------------------------------------------------
+
+### Section 4 Feature engineering explanation and exploratory analysis
+
+Using the munge_data function, I derived certain variables that were not initially available in the Gallup Daily dataset. These variables included raw income brackets, employment status (binary), whether one perceives the economy to be getting better, and the difference between one's perceived position on the Cantril Ladder at the time of the survey and in five years. Specific reasons for engineering these features were:
+
+- raw income: This variable was derived using the median values of each income group in the original Gallup Daily dataset variable (income_summary; which had 11 levels). This allowed for calculation of the demographic relative income measure and obtaining a variable that reflected participants' raw income with minimal skewness.
+
+- employment status (binary): This was derived using the original "employment type" measure from Gallup Daily, with individuals indicating they were unemployed or did not have a job coded as 0 and all others coded as 1. Derived to show participants' status of employment in a concise and informative way.
+
+- whether one perceives the economy to be getting better (economy_getting_better): Derived using 4 - [the original "economy getting better" measure] to reverse the coding scheme of the Gallup Daily survey, such that respondents with a higher original response indicated that they beleived the economic situation of the US was getting better at the time of the survey.
+
+- and the difference between one's perceived position on the Cantril Ladder at the time of the survey and in five years (cl_diff), which was derived by subtracting the position participants believed themselves to be on at the time of the survey and the anticipated Cantril Ladder position in 5 years. This accounted for the possibility that anticipated change in perceived status impacts SWB.
+
+
+#### Exploratory data analysis
+
+##### Multicollinearity
+
+Based on the figure below, it was clear that certain variables showed multicollinearity. Therefore, I deleted variables that showed high levels of multicollinearity or contained the same information as certain other variables: raw_income, income_summary, age, height (high correlation with 'sex'), and obese (same information as 'bmi'). Though there still were variables with moderate levels of correlation, the random forest algorithm would be able to discern whether these variables are useful or not, and deleting too many features may hurt the random forest prediction results. I retained "COMB_WEIGHT" (weights for responses in the Gallup Daily data) to ensure that samples were equally weighted in the random forest predictor by using case.weights = COMB_WEIGHT as a parameter of the model.
+```{r fig.align="center", echo = FALSE,fig.width = 14,fig.height=11}
+sub <- df %>% mutate_if(is.factor, as.numeric)
+
+cormat <- round(cor(sub),2)
+melted_cormat <- melt(cormat)
+
+ggplot(data = melted_cormat, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+ scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+   midpoint = 0, limit = c(-1,1), space = "Lab", 
+   name="Pearson\nCorrelation") +
+  theme_minimal()+ 
+ theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1))+
+  xlab(" ")+
+  ylab(" ")
+ 
+```
+
+
+```{r,echo=FALSE}
+df <- select(df, -c("obese","height","raw_income","income_summary","age"))
+```
+
+
+##### Outcome variable distribution
+
+The distribution of our outcome variable was multimodal, which was a bit surprising, given that it was measured on a continuous scale. Even after scaling the outcome variable, the distribution of the outcome was still multimodal. Therefore, to avoid making erroneous assumptions on the distribution of our outcome variable, I transformed the variable to a binary one, where ladder_now >= 8 was 1, and ladder_now <8 was 0 to ensure class balance. This grouping not only acheived class balance but also was reasonable, as anyone answering an 8 on the Cantril Ladder scale would not be expected to think that their life at the time of responding to Gallup Daily is "bad".
+```{r fig.align="center",echo=FALSE,fig.width=10}
+require(gridExtra)
+
+plot1 <- ggplot(df, aes(x=ladder_now)) + 
+ geom_histogram(aes(y=..density..), colour="black", fill="grey")+
+ geom_density(alpha=0.5,fill="#FF6666") +
+  xlab("Original outcome: ladder_now")
+
+plot2 <- ggplot(df, aes(x=scale(ladder_now))) + 
+ geom_histogram(aes(y=..density..), colour="black", fill="grey")+
+ geom_density(alpha=0.5,fill="#FF6666") +
+  xlab("Scaled outcome: ladder_now")
+  
+
+#create binary outcome
+df$ladder_bin <- ifelse(df$ladder_now>=8,1,0)
+
+df <- select(df, -c("ladder_now"))
+df <- mutate(df, ladder_bin = as.factor(ladder_bin))
+
+plot3 <- ggplot(df, aes(ladder_bin, ..count..)) + 
+  geom_bar(aes(fill = ladder_bin), position = "dodge", fill="steelblue")+
+  xlab("Binary outcome: ladder_bin")
+
+grid.arrange(plot1, plot2, plot3, ncol=3)
+```
+
+Given this transformation, I also deleted the original "ladder_now" variable that was continuous. The dataframe dimensions were now 77385*37.
+
+3 Machine Learning
+=================================================================
+
+Row
+-------------------------------------------------------
+
+### Section 5 Machine learning predictions and evaluation (loss function)
+
+#### Train-test split
+
+The data was split into training and testing subsets. The training set consisted of 75% of the original data, and the testing set consisted of the remaining 25% of the data.
+```{r, echo=FALSE}
+#train test split
+#train test split
+set.seed(1)
+in.train <- createDataPartition(df$ladder_bin, p = .75, list = F)
+
+train <- df[in.train,]
+test <- df[-in.train,]
+```
+
+#### Random forest
+
+The random forest algorithm is an ensemble machine learning method that averages over decorrelated decision trees when the outcome is continuous or takes the majority vote of individual trees when the outcome is binary/discrete. This algorithm resembles the human decision-making style.
+
+Using the random forest algorithm, I first established a baseline with the standard parameters, mtry = sqrt(parameters) and minimal node size = 1 (for classification). Specific model paramters were num.trees = 500, mtry = 6, min.node.size = 1, importance = "impurity", and splitrule = "gini" (binary outcome). This resulted in an accuracy score of 0.76 and an AUC score of 0.76. I then moved on to tuning model parameters.
+```{r,echo=FALSE}
+# baseline; try out model first
+set.seed(1)
+rf <- ranger(formula = ladder_bin ~ .,
+             data = train,
+             num.trees = 500,
+             mtry = 6,
+             min.node.size = 1,
+             importance = 'impurity',
+             splitrule = 'gini',
+             case.weights = train$COMB_WEIGHT
+             # num.threads = 4
+             )
+#
+rf.predictions <- predict(rf, data = test, type = "response")
+caret::confusionMatrix(data = as.factor(rf.predictions$predictions), reference = test$ladder_bin)
+
+roc.curve(rf.predictions$predictions, test$ladder_bin)
+```
+
+
+#### Tuning
+
+Model parameters were tuned using the caret package in R. I created a tuning grid using a sequence of numbers from 1 to 35 for both mtry and minimal node size. Then, I ran a random forest model using the tuning parameters, with "accuracy" as the metric and 5-fold cross-validation. The code used to create the tuning grid is shown below.
+
+ tuneGrid <- data.frame(
+ 
+   .mtry = seq(1:35),
+   
+   .splitrule = "gini", #binary outcome
+   
+   .min.node.size = seq(1:35)
+ )
+
+
+Cross-validation results showed that mtry = 35 and min.node.size = 35 generated the best accuracy. I then used these parameters in my final prediction.
+
+The number of trees was not tuned here, as mtry and minimal node size have a larger impact on random forest's prediction outcomes, and the caret package did not have the option to tune the number of trees.
+```{r,fig.align="center", echo = FALSE,fig.width = 7,fig.height=5}
+#parallel processing
+cl <- makePSOCKcluster(6)
+registerDoParallel(cl)
+
+#create tune grid and search through a wide variety of parameters
+tuneGrid <- data.frame(
+  .mtry = seq(1:35),
+  .splitrule = "gini", #binary outcome
+  .min.node.size = seq(1:35)
+)
+
+#random forest with caret and ranger
+set.seed(1)
+rf <- train(
+  ladder_bin ~ .,
+  tuneGrid = tuneGrid,
+  data = train,
+  method = "ranger",
+  metric = "Accuracy",
+  weights = train$COMB_WEIGHT,
+  trControl = trainControl(method = "cv",
+                           number = 5,
+                           verboseIter = T)
+)
+plot(rf)
+
+rf$bestTune
+
+stopCluster(cl)
+
+
+knitr::include_graphics("C:/Users/yujia/OneDrive - The University of Chicago/Desktop/MLph_project/rf_tune.png")
+```
+
+##### Final rf
+
+The final tuning parameters were mtry = 23 and min.node.size = 23.
+
+The code for running my final random forest model is shown below.
+```{r}
+final.rf <- ranger(formula = ladder_bin ~ .,
+             data = select(train,-c("COMB_WEIGHT")),
+             num.trees = 500,
+             mtry = 23,  #rf$bestTune[,1], #31
+             min.node.size = 23,  #rf$bestTune[,3], #31 #did this for faster knitting
+             importance = 'impurity',
+             splitrule = 'gini', #categorical outcome
+             case.weights = train$COMB_WEIGHT
+             )
+```
+
+
+#### Prediction results
+
+Prediction results showed that my final model generated a prediction accuracy of 0.76. It seems like parameter tuning did not improve prediction results very much, which signals that there may be other algorithms more suitable for the problem at hand. Neverthless, a 76% accuracy is more than "acceptable", and it is possible that the binary splitting of the outcome was a less than ideal way to deal with the multimodality. Methods that target the distribution of the outcome (SWB) may generate better prediction results.
+```{r,echo=FALSE}
+rf.predictions.final <- predict(final.rf, data = select(test,-c("COMB_WEIGHT")), type = "response")
+
+caret::confusionMatrix(data = as.factor(rf.predictions.final$predictions), reference = test$ladder_bin)
+```
+
+#### ROC curve
+
+```{r,fig.align="center", echo = FALSE,fig.width = 7,fig.height=5}
+#roc.curve(rf.predictions.final$predictions, test$ladder_bin)
+
+library(pROC)
+
+#define object to plot
+ROC <- roc(as.numeric(test$ladder_bin), as.numeric(rf.predictions.final$predictions))
+
+#create ROC plot
+ggroc(ROC,colour = 'steelblue', size = 1) +
+  geom_abline(intercept = 1, slope = 1, linetype="dashed") +
+  ggtitle("ROC curve for Random Forest prediction")
+
+auc <- round(auc(as.numeric(test$ladder_bin), as.numeric(rf.predictions.final$predictions)),4)
+cat('The final AUC score is:', auc,'\n')
+```
+
+
+#### Variable importance plot
+
+In the results of the random forest predictor, it seems that the difference between one's anticipated position on the Cantril Ladder in five years and their position when they answered the survey was the most important predictor for high/low (binary) SWB in all variables.
+```{r,fig.align="center", echo = FALSE,fig.width = 7,fig.height=5}
+rf.imp <- as.data.frame(final.rf$variable.importance)
+colnames(rf.imp) <- "importance"
+rf.imp$variables <- rownames(rf.imp)
+
+ggplot(rf.imp, aes(x=reorder(variables, importance), y=importance, fill=importance))+
+      geom_bar(stat="identity", position="dodge")+ coord_flip()+
+      ylab("Variable Importance")+
+      xlab("")+
+      ggtitle("Information Value Summary")+
+      guides(fill=F)+
+      scale_fill_gradient(low="red", high="blue")
+
+
+knitr::include_graphics("C:/Users/yujia/OneDrive - The University of Chicago/Desktop/MLph_project/rf_variable_importance.png")
+```
+
+#### Feature permutation importance
+
+```{r,echo=FALSE}
+df_copy <- df
+```
+
+Comparing the results of feature permutation importance with variable importance ranked by random forests, we see that the top variables are very similar. For both importance measures, the difference between one's anticipated position on the Cantril Ladder in five years and their position at the time of answering the Gallup Daily survey was rated as the most important feature for predicting SWB. Following this feature, 
+
+- whether one was satisfied with their standard of living when comparing to the living standards of others [comp_satis_std_liv], 
+
+- age (scaled), 
+
+- BMI, 
+
+- whether one had enough money to do whatever they wanted to do [enough_money], 
+
+- one's general health, 
+
+- whether one had reached their goals in the past 12 months [goals], 
+
+- and income (scaled) were all ranked to highly contribute to predicting SWB. 
+
+Although samples were not weighted in the feature permutation importance predictor (due to limitations of the mlr3 package), all predictors in the random forest remained the same, thus ensuring that prediction results followed the same set of variables. Also, though not shown here, experimentation with the random forest algorithm showed that prediction accuracy and true positive rates were not drastically different when survey weights were not included, and the feature permutation importance rankings thus provided us with plausible ratings of variable importance.
+```{r,fig.align="center", echo = FALSE,fig.width = 7,fig.height=5}
+#feature permutation importance
+task <- as_task_classif(dplyr::select(df_copy,-c("COMB_WEIGHT")), target = "ladder_bin")
+learner <- lrn("classif.ranger",
+               mtry = 23,
+               min.node.size = 23,
+               num.trees = 500,
+               importance = "impurity",
+               verbose = T,
+               num.threads = 8)
+learner$train(task)
+
+pred.rf <- Predictor$new(learner, data = test, y = test$ladder_bin, type = "prob")
+
+importance <- FeatureImp$new(pred.rf, loss = 'ce')
+
+plot(importance)
+
+
+knitr::include_graphics("C:/Users/yujia/OneDrive - The University of Chicago/Desktop/MLph_project/feature_permutation.png")
+```
+
+4 Implementation and monitoring
+===============================================================
+
+### Steps
+
+1. Create a system that cleans data in a uniform way, checks for missing values, and implements the random forest algorithm to predict SWB on all predictors. If missing data show a pattern, the reason behind the pattern should be investigated. Also, quality checks on the collected data should be performed prior to entering the data to the predictor.
+
+2. When collecting new data, it must be confirmed that new questions asked resemble the meaning of that of the original surveys. It would be best if new data were version-controlled. When entering new data, feature drift should be checked. This can be done by checking whether the distributions of new features resemble that of the old features, or running a new model in parallel with evaluation. If an evident feature drift is detected, the predictor hyperparameters might need to be updated, and the model may need to be calibrated (a moderate calibration can be implemented). Potentially, is the evidence signals severe drift, the predictor should be updated by potentially estimating a new predictor with new training and evaluation datasets. 
+
+3. Distribution of predictions and prediction accuracy also needs to be checked over time to ensure that the predictor does not deteriorate in performance. However, this may receive a delayed response. The runtime of predictors also need to be monitored to ensure that the predictor continues to perform well.
+
